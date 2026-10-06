@@ -2,3 +2,5 @@ out/
 _site/
 node_modules/
 .DS_Store
+# CLI 入口；有些全域 gitignore 會擋 bin/（Go 的慣例），這裡明確納入
+!bin/
