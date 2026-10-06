@@ -1,0 +1,102 @@
+flowdoc v1
+# flowdoc 的入門範例：一個大家都懂的情境，兩段、六個元件。
+# 示範一份文字檔怎麼變成一頁動畫；跟其他範例一樣要通過 make check。
+
+title 大頭貼不經過 API
+eyebrow flowdoc demo · 上傳大頭貼
+lede 瀏覽器拿到預簽網址後，直接把原圖傳到物件儲存；API 只發網址、記結果。縮圖交給背景 worker，失敗也不會讓使用者看到破圖。
+chip key "原圖直傳物件儲存"
+chip "示範用 · 不是真實系統"
+chip old "API 轉送原圖"
+stage "兩種情境" desc "先看正常上傳（含一條失敗分支），再看排程怎麼清掉半途放棄的上傳。"
+
+alias upload up_1 up_9
+
+store obj "物件儲存" tag "bucket: avatars" in s3
+store job "縮圖工作" tag "queue: thumbnail" in q
+store row "使用者資料" tag "users.avatar_*" in db
+
+# ───────────────────────────── Part 1
+part upload "正常上傳" actor "使用者換大頭貼"
+  cards obj job row
+  init
+    set row avatar_url = old.jpg
+    set row avatar_status = ready
+  canvas
+    node web "瀏覽器" sub "選了一張 8 MB 的照片" at 0,0
+    node s3 "物件儲存" sub "S3 · 原圖與縮圖" at 1,0
+    ghost relay "經 API 轉送原圖" sub "大檔佔住 API 的連線" at 2,0 cross s3 "不走"
+    node api "API server" sub "只發網址、記結果" changed at 0,1
+    node q "工作佇列" sub "thumbnail" at 1,1
+    node worker "縮圖 worker（新）" sub "產生 256px 縮圖" changed at 2,1
+    node db "Postgres" at 1,2
+      field "users.avatar_url" mono
+      field "+ avatar_status" mono changed
+    edge web -> api "要上傳網址"
+    edge web -> s3 "直傳原圖" key
+    edge api -> db "記狀態"
+    edge api -> q "排入縮圖" async
+    edge q -> worker "取工作" async
+    edge worker -> s3 "存縮圖"
+    edge worker -> db "換上新網址"
+  step "要一個上傳網址"
+    on web->api api->db
+    desc 預簽網址只對這個檔名有效、10 分鐘後過期。API 從頭到尾不碰 8 MB 的原圖。
+    set row avatar_status = uploading !hl
+  step "直傳物件儲存" key
+    on web->s3
+    desc 這一步決定了整個設計：原圖不經過 API，大檔不會佔住 API 的連線，上傳中斷也只影響這一個人。
+    set obj up_1/original.jpg = 8 MB !hl
+  step "回報上傳完成"
+    on web->api api->q api->db
+    desc API 先確認物件真的在 S3 才排入縮圖。使用者這時就看到「處理中」，不用等縮圖。
+    set job up_1 = queued !hl
+    set row avatar_status = processing !hl
+  step "背景產生縮圖"
+    on q->worker worker->s3
+    desc 縮圖慢一點沒關係，舊頭像還在。worker 可以獨立擴充，不影響 API 的回應時間。
+    set obj up_1/256.jpg = 18 KB !hl
+    set job up_1 = done !hl
+  step "換上新頭像"
+    on worker->db
+    desc 舊頭像一直顯示到這一步才換掉，所以前面任何一步失敗都不會出現破圖。
+    set row avatar_url = up_1/256.jpg !hl
+    set row avatar_status = ready !hl
+  step "分支：縮圖失敗" from 3
+    on q->worker
+    desc 工作留在佇列裡重試；重試三次還不行就標成失敗，使用者看到的仍是舊頭像。
+    fault "縮圖 worker 讀不到原圖"
+    expect "頭像維持 old.jpg，工作重試"
+    set job up_1 = "retry 1 / 3" !hl
+    note row "avatar_url 不變"
+
+# ───────────────────────────── Part 2
+part cleanup "清理半途放棄的上傳" actor "每小時排程"
+  cards obj row
+  init
+    set obj up_9/original.jpg = 6 MB
+    set row avatar_url = old.jpg
+    set row avatar_status = "uploading · 2 小時前"
+  canvas
+    node cron "清理排程（新）" sub "每小時一次" changed at 0,0
+    node db "Postgres" at 1,0
+      field "users.avatar_status" mono
+    node s3 "物件儲存" sub "S3 · 原圖與縮圖" at 1,1
+    edge cron -> db "找卡住的上傳"
+    edge cron -> s3 "刪原圖"
+  step "找出卡住的上傳"
+    on cron->db
+    desc 使用者拿了網址卻沒回報完成（關掉分頁、斷線），S3 裡就會留下沒人用的原圖。
+    note row "超過 1 小時沒回報 → 清理"
+  step "刪原圖、狀態改回"
+    on cron->s3 cron->db
+    desc 頭像本來就沒換，只要把狀態改回來；半途放棄的上傳不會一直佔著儲存空間。
+    unset obj up_9/original.jpg
+    note obj "up_9/original.jpg 已刪除" !gone
+    set row avatar_status = ready !hl
+
+takeaway 原圖走**瀏覽器 → 物件儲存**，API 只處理小請求；任何一步失敗，使用者看到的都還是舊頭像。
+
+footer
+  text "這一頁由 `examples/upload-avatar.flow` 產生："
+  code "node bin/flowdoc.js render examples/upload-avatar.flow -o upload-avatar.html"

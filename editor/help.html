@@ -1,0 +1,56 @@
+<div class="help-body">
+  <p>一份 <code>.flow</code> 由頁首、狀態卡、幾段情境組成；縮排一律兩個空白。完整規格見 flowdoc repo 的 <code>skill/references/format.md</code>。</p>
+
+  <h3>頁首</h3>
+  <pre>flowdoc v1
+title 大頭貼不經過 API
+lede 一句話講清楚設計。支援 `code` 與 **粗體**。
+chip key "主色強調"        chip old "被取代的做法"
+stage "兩種情境" desc "動畫區的說明"
+alias upload up_1 up_9     # 示意的 id，驗收時換成真實資料</pre>
+
+  <h3>狀態卡</h3>
+  <pre>store obj "物件儲存" tag "bucket: avatars" in s3</pre>
+
+  <h3>一段情境</h3>
+  <pre>part upload "正常上傳" actor "使用者換大頭貼"
+  cards obj row
+  init
+    set row avatar_url = old.jpg
+  canvas
+    node web "瀏覽器" sub "第二行小字" at 0,0
+    node api "API server" changed at 0,1      # 橘框：要新增或修改
+    pod svc "order_svc" at 1,0 span 1x2      # 同一個 process
+      inner run "CheckoutRunner" mono sub "說明"
+    ghost relay "經 API 轉送" at 2,0 cross s3 "不走"
+    edge web -> api "要網址"
+    edge api -> q "排入" async                # 虛線：非同步
+    edge web -> s3 "直傳原圖" key             # 分歧點那條線
+  step "直傳物件儲存" key                     # 整頁唯一的 ★
+    on web->s3                                # 連線會連兩端一起亮
+    desc 講為什麼在這一步，不講做什麼。
+    set obj up_1/original.jpg = 8 MB !hl
+  step "分支：縮圖失敗" from 3                # 狀態接第 3 步之後
+    fault "縮圖 worker 讀不到原圖"
+    expect "頭像維持舊圖"
+    note row "avatar_url 不變"                # 只給讀者看，不進斷言</pre>
+
+  <h3>動畫下方</h3>
+  <pre>takeaway 一句話重講設計。
+facts "圖上看不到的三件事"
+  fact "標題" 內文
+table "要改的檔案" cols "位置" "改什麼"
+  row "db/model" "加欄位"
+decisions "決定"
+  d D1 "決定的內容"
+footer
+  text "現況依據："
+  code "path/to/file.go"</pre>
+
+  <h3>驗收腳本</h3>
+  <p>「驗收腳本」分頁是同一份 .flow 轉出來的 Gherkin。<code>#@</code> 開頭的行是 .flow 原文；改場景名稱、「當」、「結果應該是」、表格、「最終」，或多加一個「當」，按「套用到 .flow」就轉回左邊。改到分支場景開頭照抄的前置步驟不會生效（W9），請改它第一次出現的地方。</p>
+
+  <h3>代號</h3>
+  <p><b>E</b> 開頭是 error，修好才會更新預覽；<b>W</b> 開頭是 warn，不擋，但要說得出為什麼保留。最常見的是 E1（語法）、E2（id 打錯，會建議最接近的）、W1（畫了卻沒點亮）、W7（圖太寬）。</p>
+  <p>完整的語法、驗證代號與驗收腳本的規則：<a href="https://github.com/gpwork4u/flowdoc" target="_blank" rel="noopener">github.com/gpwork4u/flowdoc</a></p>
+</div>

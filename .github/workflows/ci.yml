@@ -1,0 +1,26 @@
+# make check：範例 render＋verify（含 .feature 轉回 .flow）、editor 打包、測試（含 editor 端對端）、截圖。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Ubuntu 24.04 預設擋住非特權的 user namespace，Chrome 的 sandbox 會起不來
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: google-chrome --version
+      - run: make check
+      - name: dist/flowdoc-editor.html 要和原始碼一致
+        run: git diff --exit-code dist/flowdoc-editor.html
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: out
+          path: out

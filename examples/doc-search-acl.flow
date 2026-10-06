@@ -1,0 +1,277 @@
+flowdoc v1
+# 範例：權限在查詢時算出、不寫進向量庫的文件搜尋。示範兩個 ghost（不走的路）、雙行標籤（逐行 mono）、
+# from 0 從起點分出的分支、expect、兩組示意 id、沒有 in 的卡、平行的非同步連線，以及 qa 與舊做法欄的 table。
+
+title 權限不進索引的文件搜尋
+eyebrow 範例 · 團隊文件庫 · 設計
+lede 向量庫只判斷「內容像不像」，「能不能看」由文件服務在每次查詢時算出來，再用 `doc_id` filter 限定搜尋範圍。
+chip key "ACL = 查詢時的 doc_id filter"
+chip "collection · team-docs"
+chip "版本化 chunk id · 就緒才切換"
+chip "設計提案 · 範例"
+chip old "ACL 寫進 payload"
+stage "四種行為，分開看" desc "先選一段，再按播放。看 Part 3：**權限變動只改到 Postgres**，向量庫那張卡不會跟著動。"
+caption 向量庫的 payload 裡**沒有任何使用者 id**，只有 `space_id` 和 `doc_id`。embedding、reranker 都收在 retrieval service 裡，沒有另外畫。
+
+alias doc doc_A doc_B doc_C
+alias user amy bob u_new
+
+store req "查詢請求" tag "Search RPC" in docs.search
+store acl "文件 ACL" tag "Postgres" in pg
+store scope "可見範圍" tag "每次查詢當下計算"   # 每次查詢當下算的，沒有地方存，不加 in
+store ver "文件版本" tag "doc_index_v1" in pg
+store qd "qdrant points" tag "space = 團隊文件" in qd
+
+# ───────────────────────────── Part 1
+part publish "文件發佈" actor "系統自動"
+  cards ver qd
+  init
+    set ver doc_B = "v1　ready"
+    set ver doc_C = "v1　ready"
+    set qd doc_B = "doc_B-v1-0, doc_B-v1-1"
+    set qd doc_C = "doc_C-v1-0"
+  canvas
+    pod docs "docs service" sub "持有請求身分的那一層" at 0,0
+      inner sync "索引同步 workflow（新）" sub "debounce · 比 digest · 切版本" changed
+    node pg "Postgres" at 0,1
+      field "document · doc_index（新）" changed
+    node ret "retrieval service" sub "不檢查使用者 · 只驗 space 存在" at 1,0
+    node emb "embedding worker" sub "chunk → embed" at 1,1
+    node qd "qdrant" sub "dense + BM25 · hybrid" at 2,1
+    edge pg -> docs.sync "讀內容" "算 digest"
+    edge docs.sync -> ret "Upsert / Delete" "chunks"
+    edge ret -> emb "排入" async
+    edge emb -> qd "寫入" async
+  step "文件發佈，排入索引"
+    on pg->docs.sync
+    desc 發佈或第一次儲存時觸發；workflow 管理版本，不是只建一次。
+    set ver doc_A = "v1　pending" !hl
+  step "切 chunk，寫入 qdrant"
+    on docs.sync->ret ret->emb emb->qd
+    desc chunk id 是 `{docId}-v{rev}-{n}`。payload 只帶 space_id 和 doc_id，沒有任何人名。
+    set ver doc_A = "v1　ready" !hl
+    set qd doc_A = "doc_A-v1-0, doc_A-v1-1" !hl
+
+# ───────────────────────────── Part 2
+part ask "提問" actor "amy 搜尋文件內容"
+  cards req acl scope qd
+  init
+    set acl doc_A = owner amy
+    set acl doc_B = owner bob
+    set acl doc_C = owner bob · editor amy
+    set qd doc_A = "doc_A-v1-0, doc_A-v1-1"
+    set qd doc_B = "doc_B-v1-0, doc_B-v1-1"
+    set qd doc_C = "doc_C-v1-0"
+  canvas
+    node user "使用者" sub "文件庫的搜尋框" at 0,0
+    node gw "gateway" sub "驗 JWT · 帶身分" at 0,1
+    pod docs "docs service" sub "持有請求身分的那一層" at 1,0 span 1x2
+      inner search "DocumentV1.Search（新）" mono sub "組 filter · 回傳前再驗" changed
+      inner acl "accessScope(userID)" mono sub "owner ∪ editor ∪ 分享對象"
+    node pg "Postgres" at 1,2
+      field "document / share / editor（ACL）"
+    node ret "retrieval service" sub "不檢查使用者 · 只驗 space 存在" at 2,0
+    node rr "reranker" sub "/v1/rerank" mono at 2,1
+    node qd "qdrant" sub "dense + BM25 · hybrid" at 2,2
+    ghost global "全站搜尋 API" sub "列不出、選不到這個 space" at 3,0 cross ret "不開放"
+    edge user -> gw "提問"
+    edge gw -> docs.search "JWT"
+    edge docs.acl -> pg "查 ACL"
+    edge docs.search -> ret "Search" mono "+ doc_ids" mono key
+    edge ret -> rr "候選"
+    edge rr -> qd "filter"
+  step "amy 提問"
+    on user->gw gw->docs.search
+    desc 請求進的是 docs service，不是 retrieval：只有這一層知道「你是誰」。
+    set req user = amy !hl
+    set req q = 上一季的退貨政策改了什麼？ !hl
+  step "算出可見範圍"
+    on docs.search docs.acl->pg
+    desc 一條 SQL：owner、editor、分享對象。doc_B 是 bob 的，不在 amy 的範圍裡。
+    set scope docs = "[doc_A, doc_C]" !hl
+    set scope doc_ids = "doc_A, doc_C" !hl
+  step "帶著 doc_ids 搜尋" key
+    on docs.search->ret ret->rr rr->qd
+    desc 唯一的設計分歧點：權限變成 qdrant 的 must 條件，doc_B 的 chunk 連候選都進不去。
+    expect "命中 doc_A-v1-1、doc_C-v1-0；不會出現 doc_B-*"
+    note qd "must space_id = 團隊文件"
+    note qd "must doc_id ∈ 這 2 個 id"
+    note qd "排除 doc_B-*" !gone
+  step "回傳前再驗一次"
+    on user gw docs.search docs.acl
+    desc chunk id 先換成文件 id 與段落位置再回傳，並依文件 id 再驗一次權限。chunk id 之後會換版，不能讓它流出去。
+    expect "回傳 doc_A 第 3 段與 doc_C 第 1 段，不含 chunk id"
+    note req "依文件 id 複驗：2 / 2 通過"
+  step "分支：沒有可見文件的人提問" from 0
+    on user->gw gw->docs.search docs.acl->pg
+    desc 空的 doc_ids 到了 retrieval 會變成不加條件。所以停在 docs service 直接回空，不往下送。
+    expect "直接回空結果，不呼叫 retrieval"
+    set req user = u_new !hl
+    set req q = 專案進度？ !hl
+    set scope docs = [] !hl
+    note scope "→ 不呼叫 retrieval"
+
+# ───────────────────────────── Part 3
+part acl "調整權限" actor "bob（owner）移除 editor"
+  cards req acl scope qd
+  init
+    set acl doc_A = owner amy
+    set acl doc_B = owner bob
+    set acl doc_C = owner bob · editor amy
+    set qd doc_A = "doc_A-v1-0, doc_A-v1-1"
+    set qd doc_B = "doc_B-v1-0, doc_B-v1-1"
+    set qd doc_C = "doc_C-v1-0"
+  canvas
+    node user "使用者" sub "文件庫的搜尋框" at 0,0
+    node gw "gateway" sub "驗 JWT · 帶身分" at 0,1
+    pod docs "docs service" sub "持有請求身分的那一層" at 1,0 span 1x2
+      inner search "DocumentV1.Search（新）" mono sub "組 filter · 回傳前再驗" changed
+      inner acl "accessScope(userID)" mono sub "owner ∪ editor ∪ 分享對象"
+    node pg "Postgres" at 1,2
+      field "document / share / editor（ACL）"
+    node ret "retrieval service" sub "不檢查使用者 · 只驗 space 存在" at 2,0
+    node rr "reranker" sub "/v1/rerank" mono at 2,1
+    node qd "qdrant" sub "dense + BM25 · hybrid" at 2,2
+    ghost payload "ACL 寫進 payload" sub "每次授權都要改寫 chunk" at 3,2 cross qd "不走"
+    edge user -> gw "授權 / 提問"
+    edge gw -> pg "編輯 / 授權" "（既有 RPC）"
+    edge gw -> docs.search "JWT"
+    edge docs.acl -> pg "查 ACL"
+    edge docs.search -> ret "Search" mono "+ doc_ids" mono key
+    edge ret -> rr "候選"
+    edge rr -> qd "filter"
+  step "bob 移除 amy 的 editor"
+    on user->gw gw->pg
+    desc 只改一列 Postgres，qdrant 完全不用動。
+    set acl doc_C = owner bob !hl
+    note acl "doc_C 的 editor amy 已移除" !gone
+    note qd "— 不變 —"
+  step "amy 再問一次"
+    on user->gw gw->docs.search docs.acl->pg
+    desc 範圍是當下算的，下一次查詢就不含 doc_C。不需要重建索引，也沒有延遲。
+    set req user = amy !hl
+    set req q = 上一季的退貨政策改了什麼？ !hl
+    set scope docs = "[doc_A]" !hl
+    set scope doc_ids = "doc_A" !hl
+  step "搜尋只剩 doc_A"
+    on docs.search->ret ret->rr rr->qd
+    desc qdrant 的資料沒動，差別只在這次帶的 doc_ids 少了一個。
+    expect "只命中 doc_A-v1-1"
+    note qd "must doc_id ∈ 這 1 個 id"
+    note qd "排除 doc_B-*、doc_C-*" !gone
+
+# ───────────────────────────── Part 4
+part edit "編輯內容" actor "amy 修改 doc_A"
+  cards req scope ver qd
+  init
+    set ver "doc_A v1" = serving
+    set ver doc_B = ready
+    set ver doc_C = ready
+    set qd doc_A = "doc_A-v1-0, doc_A-v1-1"
+    set qd doc_B = "doc_B-v1-0, doc_B-v1-1"
+    set qd doc_C = "doc_C-v1-0"
+  canvas
+    node user "使用者" sub "文件庫的搜尋框" at 0,0
+    node gw "gateway" sub "驗 JWT · 帶身分" at 0,1
+    pod docs "docs service" sub "持有請求身分的那一層" at 1,0 span 1x2
+      inner search "DocumentV1.Search（新）" mono sub "組 filter · 回傳前再驗" changed
+      inner acl "accessScope(userID)" mono sub "owner ∪ editor ∪ 分享對象"
+      inner sync "索引同步 workflow（新）" sub "debounce · 比 digest · 切版本" changed
+    node pg "Postgres" at 1,2
+      field "document / share / editor（ACL）"
+      field "document · doc_index（新）" changed
+    node ret "retrieval service" sub "不檢查使用者 · 只驗 space 存在" at 2,0
+    node rr "reranker / embedding" sub "/v1/rerank · worker" mono at 2,1
+    node qd "qdrant" sub "dense + BM25 · hybrid" at 2,2
+    edge user -> gw "編輯 / 提問"
+    edge gw -> pg "寫內容" "（既有 RPC）"
+    edge gw -> docs.search "JWT"
+    edge docs.acl -> pg "查 ACL"
+    edge pg -> docs.sync "讀內容" "算 digest"
+    edge docs.search -> ret "Search" mono "+ doc_ids" mono
+    edge docs.sync -> ret "Upsert / Delete" "chunks"
+    edge ret -> rr "候選" as ret_search
+    edge ret -> rr "排入" async as ret_index
+    edge rr -> qd "filter" as rr_search
+    edge rr -> qd "寫入" async as rr_index
+  step "amy 修改內容"
+    on user->gw gw->pg pg->docs.sync
+    desc 停止編輯幾分鐘後才觸發；digest 有變才建 v2。
+    set ver "doc_A v2" = pending !hl
+    note ver "digest 變了 → 建 v2"
+  step "重建期間有人查詢"
+    on user->gw gw->docs.search docs.acl->pg docs.search->ret ret_search rr_search
+    desc 指標還在 v1，查到的是完整的舊版本，不會查到一半的 v2。
+    expect "命中 doc_A-v1-1（舊版）"
+    set req user = amy !hl
+    set req q = 上一季的退貨政策改了什麼？ !hl
+    set scope doc_ids = "doc_A, doc_C" !hl
+    note qd "doc_A-v2-* 未就緒 · 不在版本清單"
+  step "新版就緒：切換"
+    on pg->docs.sync
+    desc 同一個 transaction 裡，v2 設為 serving、v1 設為 retiring。v1 的資料先留著，給切換前就拿到清單的查詢用。
+    clear req
+    clear scope
+    set ver "doc_A v1" = retiring · 寬限 5 分鐘 !hl
+    set ver "doc_A v2" = serving !hl
+    set qd doc_A = "doc_A-v1-0, doc_A-v1-1, doc_A-v2-0, doc_A-v2-1" !hl
+    note qd "v1 是 retiring：寬限期內仍查得到"
+  step "寬限期後刪除舊版"
+    on docs.sync->ret ret_index rr_index
+    desc 過了寬限期才刪 v1。已回傳的引用存的是文件 id 與段落位置，不是 chunk id，所以不受影響。
+    unset ver "doc_A v1"
+    note ver "doc_A v1 已刪除" !gone
+    set qd doc_A = "doc_A-v2-0, doc_A-v2-1" !hl
+    note qd "purge doc_A-v1-*" !gone
+
+# ───────────────────────────── 動畫下方
+facts "圖上看不到的三件事"
+  fact "空範圍等於全搜" retrieval 只有在 `doc_ids` 不為空時才加條件，傳空 list 會搜遍整個 space。所以範圍為空時，docs service 必須直接回空結果。
+  fact "retrieval 不看使用者" `Search` 只確認 space 存在，權限檢查全靠入口。這個 space 只要出現在別的搜尋入口，就能繞過文件 ACL。
+  fact "為什麼不寫進 payload" 加 editor 或分享給別人，都要改寫那份文件的每個 chunk。改寫完成前，已撤銷的人仍查得到。
+
+takeaway qdrant 回答**「哪幾段最像」**，docs service 回答**「你能看哪幾份」**。兩個問題分開回答，權限變動就不必重建索引。
+
+table "資料範圍怎麼切" desc "三層由外往內。只有最內層跟著使用者變動。" cols "範圍" "由誰決定" "說明"
+  row "collection" "部署設定決定，全系統共用，不能每次換" "`team-docs`：所有團隊文件都在這裡。圖片、表格各有自己的 collection"
+  row "space_id" "docs service 帶固定 id（團隊文件）" "tenant 分區。所有文件寫進同一個 space，不做一人一個 space"
+  row "doc_id" "**每次查詢當下**由 accessScope 算出" "amy → doc_A · doc_C；bob → doc_B · doc_C；u_new → `[]`，直接回空"
+
+qa "常見問題"
+  q "搜尋之前能選要用哪個 collection 嗎？" **collection 不能選，範圍可以篩。**可以篩的條件有 `space_id`、`doc_id`、標籤、日期範圍。
+  q "是搜完再過濾嗎？" **不是。**filter 放進 dense 和 sparse 的 prefetch，topK 直接在可見範圍裡取，不會先取 30 筆、過濾後只剩 3 筆。
+  q "每個 space 是一個 collection 嗎？" **不是。**同類文件共用一個 collection，以 `space_id` 分區；qdrant 會按 tenant 分開儲存。
+  q "為什麼不做成一人一個 space？" 一份文件由多人共享，同一份內容要重複建索引；每次授權變動還要在 space 之間搬文件，搬完前權限都是錯的。
+  q "跟現有的全文搜尋一樣嗎？" **檢索 pipeline 不同，入口一樣。**不同的地方見下表。
+
+table "跟現有的全文搜尋差在哪" cols "" old "現有全文搜尋" "文件語意搜尋"
+  row "權限粒度" "整個 space" "每份文件 → `doc_id`"
+  row "權限來源" "space 的成員清單" "owner ∪ editor ∪ 分享對象"
+  row "入口" "gateway → search" "docs service → retrieval"
+  row "內容更新" "存檔就覆寫" "建新版本，就緒後切換"
+  row "沿用" "兩邊相同" "gateway 驗 JWT · `accessScope` · 引用格式"
+
+table "要改哪些東西" desc "依合併順序拆成三個 MR。" cols "MR" "範圍" "內容"
+  row "MR 1" "retrieval" "`SearchFilter` 補上 `doc_ids`；**封鎖**全站搜尋 API 對團隊文件 space 的存取"
+  row "MR 2" "索引同步" "新表 `doc_index_v1`（一版一列）+ migration；舊版先標 retiring，寬限期後才刪；觸發：發佈、編輯、刪除；既有文件一次性 backfill"
+  row "MR 3" "查詢" "`DocumentV1.Search`；**範圍為空直接回空，附測試**；chunk id 換成文件 id＋段落位置再回傳，並再驗一次權限"
+  row muted "不用改" "qdrant · reranker · gateway" "現況：沒有任何路徑用過 `doc_ids`"
+
+decisions "決定" desc "編號是跨文件的對照 key，發佈後不重排。"
+  d D1 "團隊文件放進一個 space；每份文件依段落切 chunk"
+  d D2 "ACL 在查詢時套用：`accessScope` 算出可見文件，換成 `doc_ids` filter"
+  d D3 "權限不寫進 qdrant payload"
+  d D4 "可見範圍為空時不呼叫 retrieval，直接回空結果"
+  d D5 "chunk id 帶版本（`{docId}-v{rev}-{n}`）；`doc_index_v1` 一版一列，`state = serving` 的那版才會被查到，新版寫入完成才切換"
+  d D6 "編輯後 debounce；digest 沒變就不重建"
+  d D7 "回傳前依文件 id 再驗一次權限"
+  d D8 "切換後舊版先標 `retiring`，寬限期（例如 5 分鐘）後才刪除，避免切換當下進行中的查詢少結果"
+  d D9 "對外不回傳 chunk id；引用一律以文件 id＋段落位置表示，重建後仍然有效"
+  d 待決 "分享連結（知道網址的人可看）要不要算進可見範圍？換的只是 scope 函式"
+
+footer
+  text "同一套做法的第一階段："
+  link "商品改了，搜尋跟著換版" ../catalog-search-sync/
+  text "這是虛構的範例系統；實際文件在這裡列出現況依據的檔案與 commit，例如："
+  code "docs/internal/acl/scope.go — accessScope"
+  code "retrieval/api/search.go — SearchFilter.doc_ids"

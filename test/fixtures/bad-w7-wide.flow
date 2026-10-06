@@ -1,0 +1,21 @@
+flowdoc v1
+# expect: W7@7
+title 太寬
+store c "卡"
+part p "段"
+  cards c
+  canvas
+    node n0 "很長的服務名稱 0" sub "說明文字說明文字" at 0,0
+    node n1 "很長的服務名稱 1" sub "說明文字說明文字" at 1,0
+    node n2 "很長的服務名稱 2" sub "說明文字說明文字" at 2,0
+    node n3 "很長的服務名稱 3" sub "說明文字說明文字" at 3,0
+    node n4 "很長的服務名稱 4" sub "說明文字說明文字" at 4,0
+    node n5 "很長的服務名稱 5" sub "說明文字說明文字" at 5,0
+    node n6 "很長的服務名稱 6" sub "說明文字說明文字" at 6,0
+    node n7 "很長的服務名稱 7" sub "說明文字說明文字" at 7,0
+    edge n0 -> n1 "呼叫"
+  step "一"
+    on n0->n1 n0 n1 n2 n3 n4 n5 n6 n7
+    set c k = v
+  step "二"
+    on n0

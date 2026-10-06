@@ -1,0 +1,15 @@
+{
+  "name": "flowdoc",
+  "version": "0.3.0",
+  "description": "用 .flow 文字檔產生可播放的架構動畫頁與 Gherkin 驗收腳本（.flow ↔ .feature 一對一互轉）；附四層驗證與瀏覽器 editor",
+  "type": "module",
+  "private": true,
+  "bin": { "flowdoc": "bin/flowdoc.js" },
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "https://github.com/gpwork4u/flowdoc.git" },
+  "homepage": "https://gpwork4u.github.io/flowdoc/",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "make check"
+  }
+}

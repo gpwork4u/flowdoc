@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>flowdoc editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/*__EDITOR_CSS__*/
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="bar">
+    <div class="brand"><span class="logo">flowdoc</span><span class="sub">editor</span></div>
+    <label class="pick">
+      <span class="vh">載入範例</span>
+      <select id="example" aria-label="載入範例">
+        <option value="">載入範例…</option>
+      </select>
+    </label>
+    <div id="status" class="status" role="status" aria-live="polite">準備中</div>
+    <div class="actions">
+      <button type="button" id="share" title="把目前的內容編進網址，複製起來給別人">複製分享連結</button>
+      <button type="button" id="dl-flow">下載 .flow</button>
+      <button type="button" id="dl-html" class="primary">下載 HTML</button>
+    </div>
+  </header>
+
+  <main class="panes">
+    <section class="left" aria-label="編輯">
+      <div class="code" id="code">
+        <div class="gutter" id="gutter" aria-hidden="true"></div>
+        <div class="field">
+          <div class="marks" id="marks" aria-hidden="true"></div>
+          <pre class="hl" id="hl" aria-hidden="true"></pre>
+          <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label=".flow 原始檔"></textarea>
+        </div>
+      </div>
+      <div class="issues-head">
+        <h2>檢查結果</h2>
+        <span class="hint">點一下跳到那一行</span>
+      </div>
+      <ol class="issues" id="issues"></ol>
+    </section>
+
+    <section class="right" aria-label="輸出">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tab-preview" aria-selected="true" aria-controls="view-preview">預覽</button>
+        <button type="button" role="tab" id="tab-feature" aria-selected="false" aria-controls="view-feature">驗收腳本</button>
+        <button type="button" role="tab" id="tab-help" aria-selected="false" aria-controls="view-help">語法速查</button>
+      </div>
+      <div class="view" id="view-preview" role="tabpanel" aria-labelledby="tab-preview">
+        <div class="stale" id="stale" hidden>有 error，預覽停在上一次成功的版本</div>
+        <iframe id="pv-a" class="pv front" title="預覽"></iframe>
+        <iframe id="pv-b" class="pv" title="預覽（更新中）"></iframe>
+      </div>
+      <div class="view" id="view-feature" role="tabpanel" aria-labelledby="tab-feature" hidden>
+        <div class="view-tools">
+          <span class="feature-state" id="feature-state">跟著 .flow 即時更新；也可以直接改，再套用回 .flow</span>
+          <button type="button" id="discard-feature" hidden>捨棄修改</button>
+          <button type="button" id="apply-feature" class="primary" disabled>套用到 .flow</button>
+          <button type="button" id="open-feature">開啟 .feature…</button>
+          <input type="file" id="feature-file" accept=".feature,.txt,text/plain" hidden>
+          <button type="button" id="dl-feature">下載 .feature</button>
+        </div>
+        <textarea class="feature" id="feature" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="驗收腳本（Gherkin .feature）"></textarea>
+        <ol class="issues feature-issues" id="feature-issues" hidden></ol>
+      </div>
+      <div class="view help" id="view-help" role="tabpanel" aria-labelledby="tab-help" hidden>
+        <!--__HELP__-->
+      </div>
+    </section>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</div>
+<script>
+/*__EDITOR_SCRIPT__*/
+</script>
+</body>
+</html>

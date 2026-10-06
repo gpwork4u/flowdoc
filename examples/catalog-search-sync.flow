@@ -1,0 +1,287 @@
+flowdoc v1
+# 範例：商品資料同步到搜尋索引。示範五段情境、pod 與 inner、平行連線（as）、async 與 eventually、
+# from 分支加 fault、init 帶入上一段的結果，以及動畫下方的 code、table、decisions、footer。
+
+title 商品改了，搜尋跟著換版
+eyebrow 範例 · 電商平台 · 第一階段
+lede 沿用現有的 `search_sync`：商品上架時把商品資料組成一份搜尋文件，並在商品上記下它的 doc_id；賣家改了內容再發佈，就換成新版。
+chip key "只改 catalog"
+chip "一個商品一份文件 · doc id = {sku}-r{rev}"
+chip "沿用 search_sync"
+chip "設計提案 · 範例"
+chip old "搜尋端自己掃 DB"
+stage "五種情境，各自一張圖" desc "每段只畫那個情境用到的 service。Part 1–4 是這一階段要做的；Part 5 是第二階段，只示意它會怎麼用這張對應表。"
+caption index 與 purge 的 Kafka topic、worker 合成一格。
+
+alias product sku_A sku_B sku_C                 # 示意的商品；驗收時每次建立真實的商品來替換
+
+store txt "組好的文件" tag "SearchText"          # 程式裡的中間產物，沒有 in：驗收腳本不直接查它
+store doc "搜尋文件" tag "search_document" in search
+store map "商品 → doc_id" tag "product.search_doc_id" in pg
+store os "索引裡的文件" tag "index = products" in os
+
+# ───────────────────────────── Part 1
+part create "上架商品" actor "賣家送出新商品"
+  cards txt doc map os
+  canvas cols 3 rows 3
+    pod cat "catalog" sub "商品建立後" at 0,0 span 1x2
+      inner api "ProductService.Create" mono sub "寫入商品（既有）"
+      inner sync "search_sync（改）" sub "組文件 → 上傳 → Create → 記 doc_id" changed
+    node blob "object storage" sub "暫存檔 · PUT 規格檔" at 1,0
+    node search "search service" sub "SearchDocumentV1" mono at 1,1
+    node idx "indexer" sub "Kafka → index worker" at 2,1
+    node os "OpenSearch" sub "index = products" at 2,2
+    node pg "Postgres" at 0,2
+      field "catalog_product_v1" mono
+      field "+ search_doc_id · rev · digest" mono changed
+    edge cat.api -> cat.sync
+    edge cat.sync -> blob "上傳規格檔"
+    edge cat.sync -> search "Create"
+    edge cat.sync -> pg "同步記 doc_id" key
+    edge search -> idx "非同步 index" async
+    edge idx -> os "寫入文件" async
+  step "商品建立完成，交給同步"
+    on cat.api->cat.sync
+    desc 沿用 `search_sync` 的觸發點：商品寫進 DB、回應賣家之後才同步，不拖慢上架。
+  step "組成一份文件"
+    on cat.sync
+    desc 沿用 `SearchText`：名稱、規格、價格、賣場依序寫進同一份文字，規格表每列已帶欄位名稱。
+    set txt 名稱 = 不鏽鋼保溫瓶 500ml !hl
+    set txt "## 規格" = … !hl
+    set txt "## 價格" = "NT$ 690" !hl
+  step "上傳規格檔"
+    on cat.sync->blob
+    desc 跟後台的「匯入規格」一樣：取得暫存檔的上傳網址，再把文字檔 PUT 上去。檔名是 SKU。
+  step "建立搜尋文件 r1"
+    on cat.sync->search
+    desc doc id 是 `{sku}-r1`。內容之後會更新，而同一個 id 再 Create 會被當成已完成、換不掉內容，所以從 r1 起就帶版本號。失敗只記 log。
+    set doc sku_A-r1 = created !hl
+  step "記下 doc_id" key
+    on cat.sync->pg
+    desc 同步寫入：Create 回成功後，同一段程式立刻用一條條件式 UPDATE 寫回 search_doc_id、rev、digest，並確認只影響 1 列。中途失敗時，backfill 用同一個 id 重跑補齊。
+    set map search_doc_id = sku_A-r1 !hl
+    set map search_doc_rev = 1 !hl
+    set map search_doc_digest = 7c1e… !hl
+  step "背景寫入 OpenSearch"
+    on search->idx idx->os
+    desc index 是非同步的。完成前搜不到這個商品，但 search_doc_id 已經正確。
+    set doc sku_A-r1 = indexed !hl
+    set os doc_id = sku_A-r1 !hl
+
+# ───────────────────────────── Part 2
+part publish "發佈變更" actor "賣家改價後發佈"
+  cards txt doc map os
+  init
+    set txt 名稱 = 不鏽鋼保溫瓶 500ml
+    set txt "## 規格" = …
+    set txt "## 價格" = "NT$ 690"
+    set doc sku_A-r1 = indexed
+    set map search_doc_id = sku_A-r1
+    set map search_doc_rev = 1
+    set map search_doc_digest = 7c1e…
+    set os doc_id = sku_A-r1
+  canvas cols 4 rows 4
+    node user "賣家後台" sub "編輯即存草稿" at 0,0
+    node gw "gateway" sub "驗 JWT" at 1,0
+    pod cat "catalog" sub "編輯與發佈" at 2,0 span 1x2
+      inner edit "UpdateDraft" mono sub "只寫 DB（既有）"
+      inner pub "PublishProduct" mono sub "發佈後交給同步（改）" changed
+      inner sync "search_sync（改）" sub "比 digest → Create r2 → 切換 → 刪 r1" changed
+    node pg "Postgres" at 2,2
+      field "search_doc_id · search_doc_rev · search_doc_digest" mono changed
+    node blob "object storage" sub "暫存檔 · PUT 規格檔" at 3,0
+    node search "search service" sub "SearchDocumentV1" mono at 3,1
+    node idx "index / purge" sub "Kafka → index worker" at 3,2
+    node os "OpenSearch" sub "index = products" at 3,3
+    edge user -> gw "編輯 / 發佈"
+    edge gw -> cat.edit via hv as gw_edit
+    edge gw -> cat.pub via hv as gw_pub
+    edge cat.edit -> pg "寫草稿"
+    edge cat.pub -> cat.sync
+    edge cat.sync -> blob "上傳新規格檔"
+    edge cat.sync -> search "Create r2" as create
+    edge cat.sync -> search "Delete r1" as delete
+    edge cat.sync -> pg "條件式切換" key
+    edge search -> idx "index r2 / purge r1" async
+    edge idx -> os "寫入 / 刪除" async
+  step "賣家改價"
+    on user->gw gw_edit cat.edit->pg
+    desc `UpdateDraft` 只寫 DB 的草稿欄位。搜尋裡還是舊內容，要等發佈後才更新。
+  step "發佈變更"
+    on user->gw gw_pub
+    desc 現在的 `search_sync` 只同步第一次上架，之後的發佈直接 return。這裡改成每次發佈都交給同步；通知追蹤者仍然只在價格下降時。
+  step "內容有變才重建"
+    on cat.pub->cat.sync
+    desc 重新算 `SearchText` 的 digest，和 search_doc_digest 比對；一樣就跳過，不一樣才建新版。
+    set txt "## 價格" = "NT$ 590" !hl
+    note map "digest 7c1e… ≠ 9f3a… → 建新版"
+  step "建立新版 r2"
+    on cat.sync->blob create
+    desc 上傳新的規格檔，Create `{sku}-r2`。Create 失敗就停在這裡，r1 繼續有效，只記 log。
+    set doc sku_A-r2 = created !hl
+  step "切換 search_doc_id"
+    on cat.sync->pg
+    desc 同步寫入，條件式 UPDATE：search_doc_rev 仍是 1 才改成 r2，並確認只影響 1 列。影響 0 列表示 backfill 已先改過或商品已下架，就刪掉剛建的 r2。
+    set map search_doc_id = sku_A-r2 !hl
+    set map search_doc_rev = 2 !hl
+    set map search_doc_digest = 9f3a… !hl
+  step "刪除舊版 r1"
+    on delete search->idx idx->os
+    desc 切換成功才刪 r1。舊版 id 可以從 rev 推出來，刪除失敗時 backfill 會再刪一次。r2 完成 index 前這個商品暫時搜不到。
+    set doc sku_A-r1 = deleting !gone
+    set doc sku_A-r2 = indexed !hl
+    set os doc_id = sku_A-r2 !hl
+    note os "purge sku_A-r1" !gone
+
+# ───────────────────────────── Part 3
+part delete "下架商品" actor "賣家刪除商品"
+  cards doc map os
+  init
+    set doc sku_A-r1 = indexed
+    set map search_doc_id = sku_A-r1
+    set map search_doc_rev = 1
+    set os doc_id = sku_A-r1
+  canvas cols 4 rows 3
+    node user "賣家後台" sub "商品 owner" at 0,0
+    node gw "gateway" sub "驗 JWT" at 1,0
+    pod cat "catalog" sub "刪除流程" at 2,0
+      inner del "DeleteProduct" mono sub "先刪搜尋文件，成功才刪商品（改）" changed
+    node pg "Postgres" sub "商品整筆資料" at 2,2
+      field "search_doc_id 隨商品一起刪"
+    node search "search service" sub "SearchDocumentV1" mono at 3,0
+    node idx "purge worker" sub "Kafka → 刪文件" at 3,1
+    node os "OpenSearch" sub "這個商品的文件" at 3,2
+    edge user -> gw "刪除"
+    edge gw -> cat.del
+    edge cat.del -> search "Delete" key
+    edge search -> idx "排入 purge" async
+    edge idx -> os "刪文件" async
+    edge cat.del -> pg "刪整筆資料"
+  step "賣家刪除商品"
+    on user->gw gw->cat.del
+    desc 權限檢查沿用既有的 `requireOwner`，這一階段不改。
+  step "先刪搜尋文件"
+    on cat.del->search search->idx idx->os
+    desc 刪除 search_doc_id 指向的文件，search service 排入 purge 清掉索引裡的文件。現在的 `search_sync` 沒有這一步，刪商品會留下搜得到的孤兒文件。
+    set doc sku_A-r1 = deleting !hl
+    clear os
+    note os "purge sku_A-r1" !gone
+  step "再刪商品資料"
+    on cat.del->pg
+    desc search_doc_* 是商品列上的欄位，跟著商品、規格、圖片在同一個 transaction 刪掉，刪除的程式不用改。
+    clear doc
+    note doc "sku_A-r1 已刪除" !gone
+    clear map
+    note map "sku_A 整筆刪除" !gone
+    eventually doc                                # 搜尋文件是上一步排入的 purge 刪掉的，要等；商品列是同步刪的，不用等
+  step "分支：搜尋服務刪除失敗" from 1
+    on user gw cat.del->search
+    desc 賣家可以重試。先刪搜尋文件再刪商品，所以不會出現商品刪了、還搜得到的情況。
+    fault "search service 的 Delete 回錯誤"
+    expect "整個刪除回錯誤，商品原封不動"
+    note doc "Delete 回錯誤"
+    note map "— 不變 —"
+
+# ───────────────────────────── Part 4
+part backfill "Backfill" actor "維運補既有商品"
+  cards doc map
+  init
+    set doc sku_A-r2 = indexed
+    set doc sku_C = indexed（舊版 search_sync 的文件）
+    set map sku_A = sku_A-r2
+  canvas cols 3 rows 2
+    node cli "維運 CLI" sub "backfill" changed at 0,0
+    pod cat "catalog" sub "與上架時同一段程式" at 1,0
+      inner sync "search_sync" sub "同一段程式 · digest 一致的跳過" changed
+    node pg "Postgres" at 1,1
+      field "catalog_product_v1.search_doc_*" mono changed
+    node blob "object storage" sub "上傳規格檔" at 2,0
+    node search "search service" sub "SearchDocumentV1" mono at 2,1
+    edge cli -> cat.sync "執行"
+    edge cat.sync -> pg "查缺漏或過時 · 寫回"
+    edge cat.sync -> blob "上傳規格檔"
+    edge cat.sync -> search "Create / Delete 舊版"
+  step "找出要補的商品"
+    on cli->cat.sync cat.sync->pg
+    desc 已上架，而且 search_doc_id 為空，或 search_doc_digest 和目前內容不同。
+    note map "sku_A：digest 一致 → 跳過"
+    note map "sku_B：沒有 search_doc_id → 待補"
+    note map "sku_C：沒有 search_doc_id、有舊文件 → 待補"
+  step "走同一條路徑"
+    on cli->cat.sync cat.sync->blob cat.sync->search cat.sync->pg
+    desc 建立 -r1、寫回欄位；舊版 `search_sync` 留下的文件（id = SKU，內容可能已過時）一併刪除。可以重跑。
+    set doc sku_B-r1 = created !hl
+    set doc sku_C-r1 = created !hl
+    set doc sku_C = deleting !gone
+    set map sku_B = sku_B-r1 !hl
+    set map sku_C = sku_C-r1 !hl
+
+# ───────────────────────────── Part 5
+part later "後續：賣場內搜尋" actor "第二階段 · 示意"
+  cards map os
+  init
+    set map sku_A = sku_A-r2
+    set map sku_B = sku_B-r1
+    set map sku_C = sku_C-r1
+    set os doc_id = "sku_A-r2, sku_B-r1, sku_C-r1"
+  canvas cols 3 rows 2
+    node shop "賣場前台" sub "新入口 · 只搜這個賣場" changed at 0,0 span 1x2
+    node cat "catalog" sub "新 RPC · 可售商品的 doc_id" changed at 1,0
+    node pg "Postgres" sub "catalog_product_v1.search_doc_id" mono at 2,0
+    node api "search API" sub "新 · 再驗一次 · 空清單回空" changed at 1,1
+    node os "OpenSearch" sub "terms doc_id ∈ 清單" at 2,1
+    edge shop -> cat "取得 doc_id"
+    edge cat -> pg "查詢"
+    edge shop -> api "關鍵字 + doc_id"
+    edge api -> os "filter" key
+  step "依賣場取得 doc_id"
+    on shop->cat cat->pg
+    desc 清單在伺服器端用賣場算出來：可售的商品取 search_doc_id。前台給不了，也改不了這份清單。
+    note map "賣場 S1 可售 sku_A、sku_C → doc_ids：sku_A-r2、sku_C-r1"
+  step "search API 查索引"
+    on shop->api api->os
+    desc 收到的 doc_id 要再比對一次。清單為空就直接回空，否則等於搜整個索引。
+    note os "terms doc_id ∈ 這 2 個 id"
+    note os "排除 sku_B-r1" !gone
+    note os "清單為空 → 直接回空"
+
+# ───────────────────────────── 動畫下方
+facts "圖上看不到的三件事"
+  fact "索引從哪來" `products` 索引由平台預先建立，catalog 只用設定的索引名稱，不建立也不檢查。索引不存在時 Create 失敗、只記 log，補上後用 backfill 重跑。
+  fact "寫回 doc_id 為什麼可靠" Create 成功後同步寫回，一條條件式 UPDATE 本身就是原子的，並檢查只影響 1 列。跨 service 放不進同一個 transaction，靠「先 Create 再寫回」加上固定 id 讓重跑安全。
+  fact "為什麼 doc id 要帶版本號" 同一個 id 再 Create 會被當成已完成，內容換不掉，所以重建一定要換 id。切換時不等新版 index 完成，也就不需要 reconciler。
+
+takeaway 這一階段只保證一件事：**每份搜尋文件都找得到它屬於哪個商品。**誰搜得到、怎麼搜，第二階段用這張表回答。
+
+code "新的欄位" desc "不開新表，三個欄位記在商品列上，刪除商品時跟著刪掉。"
+  | catalog_product_v1
+  |   + search_doc_id      string  目前那一版的 doc id：{sku}-r{rev}；空字串 = 尚未同步
+  |   + search_doc_rev     int     目前版本號，切換時做條件式更新（rev 沒變才改）
+  |   + search_doc_digest  string  SearchText 的 sha256；內容沒變就不重建
+
+table "要改的檔案" cols "位置" "改什麼"
+  row "db/model" "`catalog_product_v1.go` 加 `SearchDocID`、`SearchDocRev`、`SearchDocDigest`"
+  row "catalog_repo" "條件式 UPDATE search_doc_*；列出需要補的商品"
+  row "pkg/search_sync" "索引名稱改由設定提供；doc id 改為 `{sku}-r{rev}`；比 digest → Create → 同步寫回 → 刪舊版"
+  row "rpc_publish_product" "每次發佈都交給同步；通知追蹤者仍只在價格下降時"
+  row "rpc_delete_product" "先刪 search_doc_id 指向的文件；失敗就讓整個刪除失敗"
+  row "CLI" "backfill 缺漏與過時的商品；可重跑"
+  row muted "不動" "search service · indexer · OpenSearch · gateway · 前台"
+
+decisions "決定" desc "第一階段用 P1- 前綴，與整體設計的 D1–D10 分開編號。"
+  d P1-1 "search service 不改，也不加賣場 filter；賣場內搜尋交給第二階段的 search API"
+  d P1-2 "`products` 索引由平台預先建立；catalog 只用設定的索引名稱，不建立也不檢查"
+  d P1-3 "沿用 search_sync：一個商品一份文件；doc id 改為 `{sku}-r{rev}`"
+  d P1-4 "Create 成功後同步以條件式 UPDATE 寫回，確認只影響 1 列"
+  d P1-5 "下架商品時先刪搜尋文件，成功才刪整筆資料"
+  d P1-6 "既有商品用 CLI 補齊缺漏與過時的文件，可重跑"
+  d P1-7 "每次發佈都同步：digest 有變才建新版，切換成功後刪除舊版"
+  d P1-8 "切換後到新版 index 完成前，該商品暫時搜不到；第二階段改為新版就緒才切換"
+  d 風險 "後台管理員的全站搜尋看得到所有賣場的文件；開放賣場內搜尋前要補 search API 的檢查"
+
+footer
+  text "整體設計："
+  link "權限不進索引的文件搜尋" ../doc-search-acl/
+  text "這是虛構的範例系統；實際文件在這裡列出現況依據的檔案與 commit，例如："
+  code "catalog/pkg/search_sync/sync.go — 沿用並修改"
+  code "catalog/rpc/publish_product.go — 觸發點：發佈成功、回應賣家之後"

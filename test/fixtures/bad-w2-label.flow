@@ -1,0 +1,16 @@
+flowdoc v1
+# expect: W2@10
+title 測試文件
+store c "卡" tag "t"
+part p "段" actor "人"
+  cards c
+  canvas
+    node a "A" at x=20 y=20 w=100 h=50
+    node b "B" at x=130 y=20 w=100 h=50
+    edge a -> b "這是一個非常非常長的連線標籤"
+  step "第一步"
+    on a->b
+    set c k = v
+  step "第二步"
+    on a
+    desc 說明。

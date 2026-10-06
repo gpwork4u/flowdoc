@@ -1,0 +1,17 @@
+flowdoc v1
+# expect: W3@11
+title 測試文件
+store c "卡" tag "t"
+part p "段" actor "人"
+  cards c
+  canvas
+    node a "A" at 0,0
+    node b "B" at 2,0
+    node m "M" at 1,0
+    edge a -> b "呼叫"
+  step "第一步"
+    on a->b
+    set c k = v
+  step "第二步"
+    on a m
+    desc 說明。
