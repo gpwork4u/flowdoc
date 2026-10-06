@@ -66,9 +66,19 @@ export async function openPage(chrome, url, { width = 1440, height = 900 } = {})
     });
     const evaluate = async (expression) => {
       const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (r.error) throw new Error(`DevTools 協定回錯誤：${r.error.message}`); // 例如頁面還在導向、執行環境被換掉
       if (r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || JSON.stringify(r.result.exceptionDetails));
       return r.result.result.value;
     };
+    // /json/new 會先開 about:blank 再導向；等目標頁面載入完才回傳，否則程式可能跑在即將被換掉的頁面裡
+    const t0 = Date.now();
+    for (;;) {
+      try {
+        if (await evaluate('location.href !== "about:blank" && document.readyState === "complete"')) break;
+      } catch (e) {}
+      if (Date.now() - t0 > 20000) throw new Error(`20 秒內沒有載入完 ${url}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
     return { evaluate, close: async () => { ws.close(); await close(); } };
   } catch (e) {
     await close();
