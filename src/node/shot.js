@@ -41,11 +41,32 @@ const base = (chrome, profile) => [
   `--user-data-dir=${profile}`, "--virtual-time-budget=4000",
 ];
 
+// Chrome 開成獨立的 process group，結束時整組關掉：Linux 上只關主程序的話，子程序還會繼續寫 profile 目錄
+const GROUP = process.platform !== "win32";
+const launch = (chrome, args, stdio) => spawn(chrome, args, { stdio, detached: GROUP });
+
+function killGroup(p) {
+  try {
+    if (GROUP) process.kill(-p.pid, "SIGKILL");
+    else p.kill("SIGKILL");
+  } catch (e) {} // 已經結束了
+}
+
 async function stop(p) {
   if (p.exitCode === null && p.signalCode === null) {
-    p.kill("SIGKILL");
-    await new Promise((r) => p.once("exit", r));
+    const exited = new Promise((r) => p.once("exit", r));
+    killGroup(p);
+    await exited;
+  } else {
+    killGroup(p); // 主程序結束了，子程序可能還在
   }
+}
+
+/** 刪掉暫存的 profile；刪不掉（例如 Chrome 的子程序還沒放手）就留著，不影響檢查結果。 */
+function cleanup(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (e) {}
 }
 
 export async function screenshot(chrome, url, out, [w, h], theme) {
@@ -58,7 +79,7 @@ export async function screenshot(chrome, url, out, [w, h], theme) {
       url = pathToFileURL(frame).href;
       w = MIN_WINDOW;
     }
-    const p = spawn(chrome, [...base(chrome, profile), ...THEMES[theme], `--window-size=${w},${h}`, `--screenshot=${out}`, url], { stdio: "ignore" });
+    const p = launch(chrome, [...base(chrome, profile), ...THEMES[theme], `--window-size=${w},${h}`, `--screenshot=${out}`, url], "ignore");
     const deadline = Date.now() + TIMEOUT;
     let last = -1;
     while (Date.now() < deadline) {
@@ -74,7 +95,7 @@ export async function screenshot(chrome, url, out, [w, h], theme) {
     await stop(p);
     return existsSync(out) && statSync(out).size > 0;
   } finally {
-    rmSync(profile, { recursive: true, force: true });
+    cleanup(profile);
   }
 }
 
@@ -83,7 +104,7 @@ export async function dumpDom(chrome, url) {
   try {
     // 字型 stylesheet 會擋住後面 inline script 的執行；DOM 檢查用不到字型，直接讓它解析失敗
     const noFonts = "--host-resolver-rules=MAP fonts.googleapis.com ~NOTFOUND, MAP fonts.gstatic.com ~NOTFOUND";
-    const p = spawn(chrome, [...base(chrome, profile), noFonts, "--dump-dom", url], { stdio: ["ignore", "pipe", "ignore"] });
+    const p = launch(chrome, [...base(chrome, profile), noFonts, "--dump-dom", url], ["ignore", "pipe", "ignore"]);
     const chunks = [];
     p.stdout.on("data", (c) => chunks.push(c));
     const deadline = Date.now() + TIMEOUT;
@@ -94,7 +115,7 @@ export async function dumpDom(chrome, url) {
     await stop(p);
     return Buffer.concat(chunks).toString("utf8");
   } finally {
-    rmSync(profile, { recursive: true, force: true });
+    cleanup(profile);
   }
 }
 

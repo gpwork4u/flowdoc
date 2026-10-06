@@ -10,13 +10,25 @@ export async function openPage(chrome, url, { width = 1440, height = 900 } = {})
   const profile = mkdtempSync(join(tmpdir(), "flowdoc-cdp-"));
   const p = spawn(chrome, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
     `--user-data-dir=${profile}`, "--remote-debugging-port=0", `--window-size=${width},${height}`, "about:blank"],
-  { stdio: ["ignore", "ignore", "pipe"] });
+  { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" });
+  // 整個 process group 一起關：Linux 上只關主程序的話，子程序還會繼續寫 profile 目錄
+  const kill = () => {
+    try {
+      if (process.platform !== "win32") process.kill(-p.pid, "SIGKILL");
+      else p.kill("SIGKILL");
+    } catch (e) {}
+  };
   const close = async () => {
-    if (p.exitCode === null) {
-      p.kill("SIGKILL");
-      await new Promise((r) => p.once("exit", r));
+    if (p.exitCode === null && p.signalCode === null) {
+      const exited = new Promise((r) => p.once("exit", r));
+      kill();
+      await exited;
+    } else {
+      kill();
     }
-    rmSync(profile, { recursive: true, force: true });
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (e) {} // 暫存目錄刪不掉不影響測試結果
   };
   try {
     const browserWs = await new Promise((resolve, reject) => {
