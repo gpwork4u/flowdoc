@@ -206,3 +206,7 @@ make clean    # 刪掉 out/ 與 _site/
 - 0.2 版從 Python 改寫成 JavaScript：改寫時兩邊對同一批 `.flow`（範例、29 個錯誤 fixture、270 份隨機變形的版本）跑過，輸出的 HTML、驗證訊息、驗收腳本逐字相同。
 - 互轉對範例、fixture 與上千份隨機修改測過（沒改時逐字相同、改過的轉回後再來回一次不變）。驗收腳本還沒在真實專案裡實作 step definition、實際跑過。
 - 只讀 `.flow`，還不能直接匯入 mermaid。
+
+## 授權
+
+[MIT](LICENSE)。

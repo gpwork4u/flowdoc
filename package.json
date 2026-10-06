@@ -2,6 +2,7 @@
   "name": "flowdoc",
   "version": "0.3.0",
   "description": "用 .flow 文字檔產生可播放的架構動畫頁與 Gherkin 驗收腳本（.flow ↔ .feature 一對一互轉）；附四層驗證與瀏覽器 editor",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "bin": { "flowdoc": "bin/flowdoc.js" },
